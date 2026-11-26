@@ -11,7 +11,7 @@ Live-server challenges are NOT covered.
 import sys, json, re, time, itertools, hashlib
 from math import gcd
 from cns_toolkit import (inv, egcd, crt, iroot, factor, fermat_factor, pollard_rho,
-                         is_prime, wiener, dlog, i2b)
+                         is_prime, wiener, dlog, discrete_log, i2b)
 
 # ---------------------------------------------------------------- parsing
 NUM = re.compile(r"^(0x[0-9a-fA-F]+|[0-9]+|[0-9a-fA-F]{16,})$")
@@ -302,6 +302,21 @@ def elgamal_attacks(items):
         if a is not None and b is not None and g != ():
             m = next((d[k] for k in ("m", "plaintext", "message", "msg", "known", "pt") if k in d), None)
             pairs.append((g, a, b, m))
+    # ciphertext given as a 2-element array, e.g. cipher_known = [c1, c2] -- the
+    # shape the course's own ElGamal challenges use (the object scan above misses
+    # it because the two numbers have no c1/c2 keys, just a list index).
+    known_text = None
+    for nm, lst in by.items():
+        if any(t in nm for t in ("known", "plain", "message", "msg")):
+            for _g, v in lst:
+                if isinstance(v, str):
+                    known_text = v
+    for nm, vals in BLOCKS:
+        if len(vals) == 2:
+            key = re.sub(r"[^a-z0-9]", "", nm.lower())
+            is_known = any(t in key for t in ("known", "pub", "plain"))
+            pairs.append((("array", key), vals[0], vals[1],
+                          known_text if is_known else None))
     if not pairs:
         return
     print(f"[ElGamal] p ({P[0].bit_length()} bits), {len(pairs)} ciphertext pairs, "
@@ -344,13 +359,47 @@ def elgamal_attacks(items):
             # small p: brute force the private key
             if p.bit_length() <= 48:
                 for y in Y:
-                    x = dlog(g, y, p)
+                    x = discrete_log(g, y, p)
                     if x is not None:
                         info(f"discrete log found: x = {x}")
                         for (c1, c2) in targets:
                             report("ElGamal small p", c2 * inv(pow(c1, x, p), p) % p)
 
 # ---------------------------------------------------------------- DSA
+def _dsa_bytes(v):
+    """a challenge's flag ciphertext may arrive as an int (long hex) or a string."""
+    if isinstance(v, int):
+        return i2b(v)
+    if isinstance(v, str):
+        s = v.strip()
+        try:
+            return bytes.fromhex(s)
+        except Exception:
+            return s.encode(errors="replace")
+    return None
+
+def _dsa_flag_from_x(x, by):
+    """Once x is known, the flag is usually XOR'd with a keystream derived from x:
+    keystream = sha256(f"{x}:0") || sha256(f"{x}:1") || ...  (the Double-Entry
+    scheme). Try it automatically against any ciphertext-looking field."""
+    for cand in ("encryptedflag", "ct", "flag", "cipher", "encrypted",
+                 "ciphertext", "enc"):
+        for _g, v in by.get(cand, []):
+            ctb = _dsa_bytes(v)
+            if not ctb:
+                continue
+            ks, i = b"", 0
+            while len(ks) < len(ctb):
+                ks += hashlib.sha256(f"{x}:{i}".encode()).digest()
+                i += 1
+            fl = bytes(a ^ b for a, b in zip(ctb, ks))
+            if b"cns{" in fl:
+                txt = fl.decode(errors="replace")
+                if ("DSA keystream flag", txt) not in hits:
+                    hits.append(("DSA keystream flag", txt))
+                    print(f"\n*** [DSA keystream flag] -> {txt}\n")
+                return
+
 def dsa_attacks(items):
     by, nums = collect(items)
     Q = nums("q")
@@ -398,7 +447,10 @@ def dsa_attacks(items):
                     continue
                 ok = "  (verified: g^x = y)"
             print(f"\n*** [DSA nonce reuse, {label}] private key x = {x}{ok}\n    k = {k}\n")
-            report("DSA x as text", x)
+            keyline = (f"DSA nonce reuse ({label})", f"private key x = {x}{ok}")
+            if keyline not in hits:
+                hits.append(keyline)        # so RESULT doesn't say "Nothing found"
+            _dsa_flag_from_x(x, by)         # and go straight to the flag if we can
 
 # ---------------------------------------------------------------- main
 from math import isqrt, gcd

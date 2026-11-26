@@ -86,7 +86,7 @@ Needs campus network or VPN.
 | is a key directory (register/lookup keys) | `server_directory.py` | BASE, TARGET, MYNAME. Can't register a new name? Set MYNAME = the target and **overwrite** it. |
 | decrypts anything except the target ciphertext | `server_decrypt_oracle.py` | BASE, N, E, C, and the `oracle()` request line |
 | signs anything except your target message | `server_sign_oracle.py` | BASE, N, E, TARGET, and the `sign()` request line |
-| tells you one bit per query (odd/even, high/low half) | `rsa_parity_oracle.py` | fill N, E, C; wire `send_and_get_bit()` to the server |
+| tells you one bit per query (odd/even, high/low half) | `server_parity_oracle.py` | fill N, E, C; wire `send_and_get_bit()` to the server |
 | does an unauthenticated Diffie-Hellman exchange | `server_dh_mitm.py` | P, G, and relay g^d to both sides |
 | is a raw `nc host port` server (prompts, not http) | `server_socket.py` | HOST, PORT, and the conversation block |
 

@@ -133,6 +133,84 @@ def dlog(base, target, p):
         g = g * factor_ % p
     return None
 
+def _bsgs(base, target, p, n):
+    """baby-step giant-step for base^x = target (mod p) with 0 <= x < n.
+    Like dlog() but bounded to a subgroup of order n (used by Pohlig-Hellman)."""
+    base %= p
+    target %= p
+    m = isqrt(n) + 1
+    table = {}
+    e = 1
+    for j in range(m):
+        table.setdefault(e, j)
+        e = e * base % p
+    factor_ = pow(base, -m, p)
+    g = target
+    for i in range(m + 1):
+        if g in table:
+            x = i * m + table[g]
+            if x < n:
+                return x
+        g = g * factor_ % p
+    return None
+
+def mult_order(a, p, group_order=None):
+    """multiplicative order of a mod p (the smallest d>0 with a^d = 1), as a
+    divisor of group_order (default p-1). Needs group_order to factor."""
+    if group_order is None:
+        group_order = p - 1
+    o = group_order
+    for q in set(factor(group_order)):
+        while o % q == 0 and pow(a, o // q, p) == 1:
+            o //= q
+    return o
+
+def pohlig_hellman(base, target, p, order=None):
+    """discrete log base^x = target (mod p) when the group ORDER IS SMOOTH
+    (only small prime factors). Splits the big DLP into one small DLP per
+    prime-power factor and recombines with CRT. Use when p-1 (or the subgroup
+    order) factors into small primes; far faster than plain BSGS there.
+    Robust when `base` is not a full generator: it solves within base's own
+    (sub)group, so g need not be a primitive root."""
+    if order is None:
+        order = p - 1
+    order = mult_order(base, p, order)   # reduce to base's true order (handles
+                                         # non-primitive generators correctly)
+    fac = {}
+    for q in factor(order):
+        fac[q] = fac.get(q, 0) + 1
+    res, mod = [], []
+    for q, e in fac.items():
+        qe = q ** e
+        gi = pow(base, order // qe, p)        # has order q^e
+        hi = pow(target, order // qe, p)
+        gamma = pow(gi, q ** (e - 1), p)      # has order q
+        x = 0                                 # x mod q^e, one digit at a time
+        for k in range(e):
+            base_k = hi * inv(pow(gi, x, p), p) % p
+            rhs = pow(base_k, q ** (e - 1 - k), p)
+            d = _bsgs(gamma, rhs, p, q)
+            if d is None:
+                return None
+            x += d * (q ** k)
+        res.append(x % qe)
+        mod.append(qe)
+    val, _ = crt(res, mod)
+    return val
+
+def discrete_log(base, target, p, order=None):
+    """cheap discrete log: Pohlig-Hellman when the order is smooth, else BSGS.
+    Not magic -- it fails (slowly) on strong parameters, which is the point."""
+    if order is None:
+        order = p - 1
+    try:
+        fs = factor(order)
+        if fs and max(fs) < (1 << 40):
+            return pohlig_hellman(base, target, p, order)
+    except Exception:
+        pass
+    return _bsgs(base, target, p, order)
+
 # ---------- bytes <-> int ----------
 def i2b(x):
     return x.to_bytes((x.bit_length() + 7) // 8, "big")
@@ -245,8 +323,11 @@ def elgamal_k_reuse(c2_known, m_known, c2_target, q):
     return c2_target * inv(K, q) % q
 
 def elgamal_crack(c1, c2, q, alpha, ya):
-    """small q: brute-force private key"""
-    xa = dlog(alpha, ya, q)
+    """recover the private key by discrete log (small OR smooth-order q), then
+    decrypt. `q` here is the prime modulus p."""
+    xa = discrete_log(alpha, ya, q)
+    if xa is None:
+        return None
     return elgamal_dec(c1, c2, q, xa)
 
 # ---------- Diffie-Hellman ----------
@@ -257,8 +338,11 @@ def dh_shared(other_public, my_private, q):
     return pow(other_public, my_private, q)
 
 def dh_crack(q, alpha, ya, yb):
-    """small q: recover shared key from public values"""
-    xb = dlog(alpha, yb, q)
+    """recover the shared key from public values by discrete log (small OR
+    smooth-order q). `q` here is the prime modulus p."""
+    xb = discrete_log(alpha, yb, q)
+    if xb is None:
+        return None
     return pow(ya, xb, q)
 
 # ---------- DSA ----------
@@ -279,6 +363,23 @@ def dsa_k_reuse(h1, s1, h2, s2, r, q):
     k = (h1 - h2) * inv(s1 - s2, q) % q
     x = (s1 * k - h1) * inv(r, q) % q
     return k, x
+
+def dsa_k_known(h, s, r, k, q):
+    """known / guessable / leaked nonce k (constant, small, timestamp, ...):
+    private key x = (s*k - h) / r  mod q."""
+    return (s * k - h) * inv(r, q) % q
+
+def dsa_k_linear(h1, s1, r1, h2, s2, r2, a, b, q):
+    """nonces linearly related k2 = a*k1 + b (e.g. a weak PRNG / counter):
+    solve the two signing equations for x. Returns x or None.
+    (k2 = k1+1 is a=1, b=1; a reused nonce is the a=1, b=0 / same-r case above.)"""
+    try:
+        inv_s1 = inv(s1, q)
+        num = (a * s2 * h1 * inv_s1 + b * s2 - h2) % q
+        den = (r2 - a * s2 * r1 * inv_s1) % q
+        return num * inv(den, q) % q
+    except Exception:
+        return None
 
 # ---------- input / output helpers (hex, base64, JSON, servers) ----------
 import json, base64, urllib.request
